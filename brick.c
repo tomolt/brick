@@ -52,6 +52,12 @@ static const char *req_keys[] = {
 static char req_headers[sizeof req_keys / sizeof *req_keys - 1][MAX_HEADER];
 static char req_path[MAX_PATH];
 
+static const char *mime_types[] = {
+	".html", "text/html",
+	".htm", "text/html",
+	NULL
+};
+
 static void
 usage(void)
 {
@@ -285,12 +291,23 @@ process_request(int idx)
 	// TODO err check
 	conn->content_length = meta.st_size;
 
+	const char *mime = "text/plain";
+	size_t pathlen = strlen(req_path);
+	for (int i = 0; mime_types[i]; i += 2) {
+		size_t len = strlen(mime_types[i]);
+		if (pathlen < len) continue;
+		if (!strcmp(req_path + pathlen - len, mime_types[i])) {
+			mime = mime_types[i+1];
+			break;
+		}
+	}
+
 	conn->length = snprintf(conn->scratch, SCRATCH,
 		"HTTP/1.1 200 OK\r\n"
 		"Server: brick\r\n"
-		"Content-Type: text/html;charset=UTF-8\r\n"
+		"Content-Type: %s\r\n"
 		"Content-Length: %llu\r\n"
-		"\r\n", (long long unsigned) conn->content_length);
+		"\r\n", mime, (long long unsigned) conn->content_length);
 	return 0;
 }
 
