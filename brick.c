@@ -263,24 +263,34 @@ static int
 process_request(int idx)
 {
 	struct conn *conn = &conns[idx];
+	conn->content_length = 0;
 
 	if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
 	printf("Requested path: %s\n", req_path);
 
 	conn->src = open(req_path, O_RDONLY);
-	// TODO 404
+	if (conn->src < 0) {
+		conn->length = snprintf(conn->scratch, SCRATCH,
+			"HTTP/1.1 404 Not Found\r\n"
+			"Server: brick\r\n"
+			"Content-Type: text/html;charset=UTF-8\r\n"
+			"Content-Length: 13\r\n"
+			"\r\n"
+			"404 Not Found");
+		return 0;
+	}
+
 	struct stat meta;
 	fstat(conn->src, &meta);
 	// TODO err check
 	conn->content_length = meta.st_size;
 
-	conn->offset = 0;
 	conn->length = snprintf(conn->scratch, SCRATCH,
 		"HTTP/1.1 200 OK\r\n"
 		"Server: brick\r\n"
+		"Content-Type: text/html;charset=UTF-8\r\n"
 		"Content-Length: %llu\r\n"
 		"\r\n", (long long unsigned) conn->content_length);
-
 	return 0;
 }
 
@@ -309,7 +319,7 @@ process_conn(int idx, int revents)
 
 		if (conn->offset == conn->length) {
 			printf("Sent a response.\n");
-			switch_phase(idx, PAYLOAD);
+			switch_phase(idx, conn->content_length ? PAYLOAD : REQUEST);
 		}
 		return 0;
 
