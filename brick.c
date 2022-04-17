@@ -372,6 +372,7 @@ teardown(void)
 	}
 	for (int i = 0; i < nconns; i++) {
 		close(conns[i].sock);
+		if (!(conns[i].src < 0)) close(conns[i].src);
 	}
 	for (int i = 0; i < MAX_CONNS; i++) {
 		free(conns[i].scratch);
