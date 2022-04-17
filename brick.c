@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
@@ -31,6 +32,7 @@ struct conn {
 	socklen_t addrlen;
 	size_t offset;
 	size_t length;
+	size_t content_length;
 	enum phase phase;
 	int sock;
 	int src;
@@ -102,11 +104,11 @@ open_portal(const char *host, const char *port)
 }
 
 static int
-recv_some(int fd, char *buf, size_t *len, size_t max)
+read_some(int fd, char *buf, size_t *len, size_t max)
 {
 	if (*len == max) return -1;
 	for (;;) {
-		ssize_t n = recv(fd, buf + *len, max - *len, 0);
+		ssize_t n = read(fd, buf + *len, max - *len);
 		if (!n) return -1;
 		if (n > 0) {
 			*len += n;
@@ -124,10 +126,10 @@ recv_some(int fd, char *buf, size_t *len, size_t max)
 }
 
 static int
-send_some(int fd, const char *buf, size_t *off, size_t len)
+write_some(int fd, const char *buf, size_t *off, size_t len)
 {
 	for (;;) {
-		ssize_t n = send(fd, buf + *off, len - *off, 0);
+		ssize_t n = write(fd, buf + *off, len - *off);
 		if (n >= 0) {
 			*off += n;
 			return 0;
@@ -162,6 +164,7 @@ add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 	memcpy(&conn->addr, addr, addrlen);
 	conn->addrlen = addrlen;
 	conn->sock = fd;
+	conn->src = -1;
 
 	conn_pfds[idx].fd = fd;
 	conn_pfds[idx].events = POLLIN;
@@ -175,6 +178,7 @@ del_conn(int idx)
 	struct conn *conn = &conns[idx];
 	char *scratch = conn->scratch;
 	close(conn->sock);
+	if (!(conn->src < 0)) close(conn->src);
 	
 	nconns--;
 	conns[idx] = conns[nconns];
@@ -182,6 +186,16 @@ del_conn(int idx)
 
 	memset(&conns[nconns], 0, sizeof (struct conn));
 	conns[nconns].scratch = scratch;
+}
+
+static void
+switch_phase(int idx, enum phase phase)
+{
+	struct conn *conn = &conns[idx];
+	conn->phase  = phase;
+	conn->offset = 0;
+	conn->length = 0;
+	conn_pfds[idx].events = phase == REQUEST ? POLLIN : POLLOUT;
 }
 
 static int
@@ -245,26 +259,29 @@ parse_http(const char *buf, const char **keys, char (*values)[MAX_HEADER], char 
 	return 0;
 }
 
-static void
+static int
 process_request(int idx)
 {
-	printf("Requested path: %s\n", req_path);
 	struct conn *conn = &conns[idx];
 
-	/*conn->src = open(req_path, O_RDONLY);
+	if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
+	printf("Requested path: %s\n", req_path);
+
+	conn->src = open(req_path, O_RDONLY);
 	// TODO 404
 	struct stat meta;
+	fstat(conn->src, &meta);
 	// TODO err check
-	fstat(conn->src, &meta);*/
+	conn->content_length = meta.st_size;
 
-	conn->phase  = RESPONSE;
 	conn->offset = 0;
 	conn->length = snprintf(conn->scratch, SCRATCH,
 		"HTTP/1.1 200 OK\r\n"
 		"Server: brick\r\n"
-		"Content-Length: 0\r\n"
-		"\r\n");
-	conn_pfds[idx].events = POLLOUT;
+		"Content-Length: %llu\r\n"
+		"\r\n", (long long unsigned) conn->content_length);
+
+	return 0;
 }
 
 static int
@@ -276,30 +293,43 @@ process_conn(int idx, int revents)
 	switch (conn->phase) {
 	case REQUEST:
 		if (!(revents & POLLIN)) return 0;
-		if (recv_some(conn->sock, conn->scratch, &conn->length, SCRATCH) < 0) return -1;
+		if (read_some(conn->sock, conn->scratch, &conn->length, SCRATCH) < 0) return -1;
 
 		if (conn->length >= 4 && !memcmp(conn->scratch + conn->length - 4, "\r\n\r\n", 4)) {
 			conn->scratch[conn->length - 2] = 0;
 			printf("Received a request.\n");
-			if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
-			process_request(idx);
+			switch_phase(idx, RESPONSE);
+			return process_request(idx);
 		}
 		return 0;
 
 	case RESPONSE:
 		if (!(revents & POLLOUT)) return 0;
-		if (send_some(conn->sock, conn->scratch, &conn->offset, conn->length) < 0) return -1;
+		if (write_some(conn->sock, conn->scratch, &conn->offset, conn->length) < 0) return -1;
 
 		if (conn->offset == conn->length) {
 			printf("Sent a response.\n");
-			conn->phase  = REQUEST;
-			conn->offset = 0;
-			conn->length = 0;
-			conn_pfds[idx].events = POLLIN;
+			switch_phase(idx, PAYLOAD);
 		}
 		return 0;
 
 	case PAYLOAD:
+		if (!(revents & POLLOUT)) return 0;
+
+		if (conn->offset == conn->length) {
+			conn->offset = 0;
+			conn->length = 0;
+			if (read_some(conn->src, conn->scratch, &conn->length, SCRATCH) < 0) return -1;
+			conn->content_length -= conn->length;
+		}
+
+		if (write_some(conn->sock, conn->scratch, &conn->offset, conn->length) < 0) return -1;
+
+		if (conn->offset == conn->length && !conn->content_length) {
+			printf("Sent the payload.\n");
+			switch_phase(idx, REQUEST);
+			close(conn->src);
+		}
 		return 0;
 
 	default:
