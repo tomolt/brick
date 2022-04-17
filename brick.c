@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -10,12 +11,15 @@
 #include <errno.h>
 #include <tls.h>
 
+#define MIN(a,b) ((a)<(b)?(a):(b))
 #define SWAP(t,a,b) do { t _tv=(a); (a)=(b); (b)=_tv; } while (0)
 
 #define NUM_PORTALS 1
 #define MAX_CONNS   2
 #define BACKLOG     128
 #define SCRATCH     2048
+#define MAX_PATH    200
+#define MAX_HEADER  200
 
 enum phase {
 	REQUEST, RESPONSE, PAYLOAD
@@ -128,60 +132,66 @@ del_conn(int idx)
 	conns[nconns].scratch = scratch;
 }
 
-#if 0
-static bool
-parse_http(const char *buf, const HTTP_Field *fields)
+static int
+parse_http(const char *buf, const char **keys, char **values, char *path)
 {
 	const char *p, *q;
 	size_t n;
-	const HTTP_Field *field;
-	for (field = fields; field->key; ++field) {
-		field->value[0] = 0;
+	int i;
+
+	for (i = 0; keys[i]; i++) {
+		values[i][0] = 0;
 	}
+	path[0] = 0;
 	p = buf;
+	
 	/* Ensure the used method is GET. */
-	if (strncmp(p, "GET ", 4)) return false;
+	if (strncmp(p, "GET ", 4)) return -1;
 	p += 4;
+	
 	/* Parse the target path. */
-	if (!(q = strchr(p, ' '))) return false;
-	if (p == q) return false;
-	n = MIN((size_t) (q-p), field->max-1);
-	memcpy(field->value, p, n);
-	field->value[n] = 0;
+	if (!(q = strchr(p, ' '))) return -1;
+	if (p == q) return -1;
+	n = MIN((size_t) (q-p), MAX_PATH-1);
+	memcpy(path, p, n);
+	path[n] = 0;
 	p = q + 1;
+	
 	/* Parse the HTTP version & end of line. Must be HTTP/1.1. */
-	if (strncmp(p, "HTTP/1.1\r\n", 10)) return false;
+	if (strncmp(p, "HTTP/1.1\r\n", 10)) return -1;
 	p += 10;
+	
 	/* Assume each line corresponds to a header field. */
 	while (*p) {
 		/* Use linear search to identify the given header field. */
-		for (field = fields; field->key; ++field) {
-			n = strlen(field->key);
-			if (!strncasecmp(p, field->key, n)) {
-				p += n;
+		for (i = 0; keys[i]; i++) {
+			if (!strcasecmp(p, keys[i])) {
+				p += strlen(keys[i]);
 				break;
 			}
 		}
+
 		/* If we don't recognize the header field, we silently ignore it. */
-		if (!field->key) {
-			if (!(q = strstr(p, "\r\n"))) return false;
+		if (!keys[i]) {
+			if (!(q = strstr(p, "\r\n"))) return -1;
 			p = q + 2;
 			continue;
 		}
+
 		/* Enforce the colon after the field name & skip whitespace. */
-		if (*p != ':') return false;
-		++p;
-		while (*p == ' ' || *p == '\t') ++p;
+		if (*p != ':') return -1;
+		p++;
+		while (*p == ' ' || *p == '\t') p++;
+
 		/* Copy the field's value and advance. */
-		if (!(q = strstr(p, "\r\n"))) return false;
-		n = MIN((size_t) (q-p), field->max-1);
-		memcpy(field->value, p, n);
-		field->value[n] = 0;
+		if (!(q = strstr(p, "\r\n"))) return -1;
+		n = MIN((size_t) (q-p), MAX_HEADER-1);
+		memcpy(values[i], p, n);
+		values[i][n] = 0;
 		p = q + 2;
 	}
-	return true;
+	return 0;
 }
-#endif
 
 static int
 process_conn(int idx, int revents)
