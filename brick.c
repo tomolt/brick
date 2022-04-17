@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <tls.h>
 
+#define SWAP(t,a,b) do { t _tv=(a); (a)=(b); (b)=_tv; } while (0)
+
 #define NUM_PORTALS 1
 #define MAX_CONNS   2
 #define BACKLOG     128
@@ -19,21 +21,20 @@ enum phase {
 	REQUEST, RESPONSE, PAYLOAD
 };
 
-/* Connection Control Block */
-struct ccb {
+struct conn {
+	char *scratch;
 	struct sockaddr_storage addr;
 	socklen_t addrlen;
 	size_t progress;
 	enum phase phase;
+	int sock;
 };
 
 static int nconns;
 
-static struct pollfd all_pfds[NUM_PORTALS + MAX_CONNS];
-
-static struct ccb     conn_blks[MAX_CONNS];
+static struct pollfd  all_pfds[NUM_PORTALS + MAX_CONNS];
+static struct conn    conns[MAX_CONNS];
 static struct pollfd *conn_pfds = all_pfds + NUM_PORTALS;
-static char         **conn_scratch[MAX_CONNS];
 
 static void
 usage(void)
@@ -99,12 +100,13 @@ add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 
 	fcntl(fd, F_SETFL, O_NONBLOCK);
 
-	struct ccb blk = { 0 };
-	memcpy(&blk.addr, addr, addrlen);
-	blk.addrlen = addrlen;
-
 	int idx = nconns++;
-	conn_blks[idx] = blk;
+	struct conn *conn = &conns[idx];
+
+	memcpy(&conn->addr, addr, addrlen);
+	conn->addrlen = addrlen;
+	conn->sock = fd;
+
 	conn_pfds[idx].fd = fd;
 	conn_pfds[idx].events = POLLIN;
 }
@@ -114,11 +116,16 @@ del_conn(int idx)
 {
 	printf("Closing a connection.\n");
 
-	close(conn_pfds[idx].fd);
+	struct conn *conn = &conns[idx];
+	char *scratch = conn->scratch;
+	close(conn->sock);
 	
 	nconns--;
+	conns[idx] = conns[nconns];
 	conn_pfds[idx] = conn_pfds[nconns];
-	conn_blks[idx] = conn_blks[nconns];
+
+	memset(&conns[nconns], 0, sizeof (struct conn));
+	conns[nconns].scratch = scratch;
 }
 
 #if 0
@@ -179,17 +186,18 @@ parse_http(const char *buf, const HTTP_Field *fields)
 static int
 process_conn(int idx, int revents)
 {
+	struct conn *conn = &conns[idx];
 	int ret;
 
 	printf("fd event: %hd\n", revents);
 	if (revents & POLLERR) return -1;
 
-	switch (conn_blks[idx].phase) {
+	switch (conn->phase) {
 	case REQUEST:
 		if (!(revents & POLLIN)) return 0;
-		if (conn_blks[idx].progress >= SCRATCH) return -1;
+		if (conn->progress >= SCRATCH) return -1;
 retry_recv:
-		ret = recv(conn_pfds[idx].fd, conn_scratch[idx], SCRATCH - conn_blks[idx].progress, 0);
+		ret = recv(conn->sock, conn->scratch, SCRATCH - conn->progress, 0);
 		if (!ret) return -1;
 		if (ret < 0) {
 			switch (errno) {
@@ -204,11 +212,12 @@ retry_recv:
 				return -1;
 			}
 		}
-		conn_blks[idx].progress += ret;
+		conn->progress += ret;
 
-		//if (conn_blks[idx].progress < 4) return 0;
-		//if (memcmp(conn_scratch[idx])) return 0;
+		if (conn->progress < 4) return 0;
+		if (memcmp(conn->scratch + conn->progress - 4, "\r\n\r\n", 4)) return 0;
 
+		
 
 		return 0;
 
@@ -230,10 +239,10 @@ teardown(void)
 		close(all_pfds[i].fd);
 	}
 	for (int i = 0; i < nconns; i++) {
-		close(conn_pfds[i].fd);
+		close(conns[i].sock);
 	}
 	for (int i = 0; i < MAX_CONNS; i++) {
-		free(conn_scratch[i]);
+		free(conns[i].scratch);
 	}
 }
 
@@ -249,8 +258,8 @@ main(int argc, const char *argv[])
 	all_pfds[0].events = POLLIN;
 
 	for (int i = 0; i < MAX_CONNS; i++) {
-		conn_scratch[i] = malloc(SCRATCH);
-		if (!conn_scratch[i]) {
+		conns[i].scratch = malloc(SCRATCH);
+		if (!conns[i].scratch) {
 			fprintf(stderr, "malloc: %s\n", strerror(errno));
 			exit(1);
 		}
