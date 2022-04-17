@@ -404,7 +404,7 @@ main(int argc, const char *argv[])
 		for (int i = 0; i < NUM_PORTALS; i++) {
 			if (all_pfds[i].revents & POLLIN) {
 				struct sockaddr_storage addr;
-				socklen_t addrlen;
+				socklen_t addrlen = sizeof addr;
 				int fd = accept(all_pfds[i].fd, (void *) &addr, &addrlen);
 				add_conn(fd, &addr, addrlen);
 			}
