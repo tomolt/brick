@@ -40,6 +40,14 @@ static struct pollfd  all_pfds[NUM_PORTALS + MAX_CONNS];
 static struct conn    conns[MAX_CONNS];
 static struct pollfd *conn_pfds = all_pfds + NUM_PORTALS;
 
+static const char *req_keys[] = {
+	"Connection",
+	NULL
+};
+
+static char req_headers[sizeof req_keys / sizeof *req_keys - 1][MAX_HEADER];
+static char req_path[MAX_PATH];
+
 static void
 usage(void)
 {
@@ -133,7 +141,7 @@ del_conn(int idx)
 }
 
 static int
-parse_http(const char *buf, const char **keys, char **values, char *path)
+parse_http(const char *buf, const char **keys, char (*values)[MAX_HEADER], char *path)
 {
 	const char *p, *q;
 	size_t n;
@@ -196,11 +204,13 @@ parse_http(const char *buf, const char **keys, char **values, char *path)
 static void
 process_request(int idx)
 {
+	printf("Requested path: %s\n", req_path);
 	struct conn *conn = &conns[idx];
 	conn->phase = RESPONSE;
 	conn->progress = snprintf(conn->scratch, SCRATCH,
 		"HTTP/1.1 404 Not Found\r\n"
 		"Server: brick\r\n"
+		"Content-Length: 0\r\n"
 		"\r\n");
 	conn_pfds[idx].events = POLLOUT;
 }
@@ -211,7 +221,6 @@ process_conn(int idx, int revents)
 	struct conn *conn = &conns[idx];
 	ssize_t ret;
 
-	printf("fd event: %hd\n", revents);
 	if (revents & POLLERR) return -1;
 
 	switch (conn->phase) {
@@ -238,9 +247,9 @@ retry_recv:
 
 		if (conn->progress < 4) return 0;
 		if (memcmp(conn->scratch + conn->progress - 4, "\r\n\r\n", 4)) return 0;
-		conn->scratch[conn->progress - 4] = 0;
+		conn->scratch[conn->progress - 2] = 0;
 		printf("Received a request.\n");
-		//if (parse_http() < 0) return -1;
+		if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
 		process_request(idx);
 		return 0;
 
@@ -262,7 +271,7 @@ retry_send:
 			}
 		}
 		conn->progress -= ret;
-		memmove(conn->scratch, conn->scratch + ret, ret);
+		memmove(conn->scratch, conn->scratch + ret, conn->progress - ret);
 
 		if (conn->progress) return 0;
 		printf("Sent a response.\n");

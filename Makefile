@@ -1,7 +1,7 @@
 CC=gcc
 LD=gcc
-CFLAGS=-Os -Wall -Wextra -pedantic
-LDFLAGS=-Os
+CFLAGS=-g -Wall -Wextra -pedantic
+LDFLAGS=-g
 LIBS=-ltls
 
 .PHONY: all clean
