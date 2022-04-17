@@ -193,11 +193,23 @@ parse_http(const char *buf, const char **keys, char **values, char *path)
 	return 0;
 }
 
+static void
+process_request(int idx)
+{
+	struct conn *conn = &conns[idx];
+	conn->phase = RESPONSE;
+	conn->progress = snprintf(conn->scratch, SCRATCH,
+		"HTTP/1.1 404 Not Found\r\n"
+		"Server: brick\r\n"
+		"\r\n");
+	conn_pfds[idx].events = POLLOUT;
+}
+
 static int
 process_conn(int idx, int revents)
 {
 	struct conn *conn = &conns[idx];
-	int ret;
+	ssize_t ret;
 
 	printf("fd event: %hd\n", revents);
 	if (revents & POLLERR) return -1;
@@ -207,7 +219,7 @@ process_conn(int idx, int revents)
 		if (!(revents & POLLIN)) return 0;
 		if (conn->progress >= SCRATCH) return -1;
 retry_recv:
-		ret = recv(conn->sock, conn->scratch, SCRATCH - conn->progress, 0);
+		ret = recv(conn->sock, conn->scratch + conn->progress, SCRATCH - conn->progress, 0);
 		if (!ret) return -1;
 		if (ret < 0) {
 			switch (errno) {
@@ -226,12 +238,37 @@ retry_recv:
 
 		if (conn->progress < 4) return 0;
 		if (memcmp(conn->scratch + conn->progress - 4, "\r\n\r\n", 4)) return 0;
-
-		
-
+		conn->scratch[conn->progress - 4] = 0;
+		printf("Received a request.\n");
+		//if (parse_http() < 0) return -1;
+		process_request(idx);
 		return 0;
 
 	case RESPONSE:
+		if (!(revents & POLLOUT)) return 0;
+retry_send:
+		ret = send(conn->sock, conn->scratch, conn->progress, 0);
+		if (ret < 0) {
+			switch (errno) {
+			case EINTR:
+				goto retry_send;
+#if EAGAIN != EWOULDBLOCK
+			case EAGAIN:
+#endif
+			case EWOULDBLOCK:
+				return 0;
+			default:
+				return -1;
+			}
+		}
+		conn->progress -= ret;
+		memmove(conn->scratch, conn->scratch + ret, ret);
+
+		if (conn->progress) return 0;
+		printf("Sent a response.\n");
+		conn->phase = REQUEST;
+		conn->progress = 0;
+		conn_pfds[idx].events = POLLIN;
 		return 0;
 
 	case PAYLOAD:
