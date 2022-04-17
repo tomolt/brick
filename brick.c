@@ -4,13 +4,14 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
 #include <errno.h>
 #include <tls.h>
 
 #define NUM_PORTALS 1
-#define MAX_CONNS   1000
+#define MAX_CONNS   2
 #define BACKLOG     128
 
 enum phase {
@@ -23,6 +24,7 @@ struct ccb {
 	socklen_t addrlen;
 	struct tls *tls;
 	enum phase phase;
+	size_t progress;
 };
 
 static int nconns;
@@ -83,8 +85,37 @@ open_portal(const char *host, const char *port)
 static void
 add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 {
+	if (nconns >= MAX_CONNS) {
+		printf("Rejecting a connection.\n");
+		close(fd);
+		return;
+	}
+
 	printf("Accepted a new connection.\n");
-	close(fd);
+
+	fcntl(fd, F_SETFL, O_NONBLOCK);
+
+	int idx = nconns++;
+	memcpy(&ccbs[idx].addr, addr, addrlen);
+	ccbs[idx].addrlen = addrlen;
+	ccbs[idx].phase = REQUEST;
+	ccbs[idx].progress = 0;
+	pfds[NUM_PORTALS + idx].fd = fd;
+	pfds[NUM_PORTALS + idx].events = POLLIN;
+}
+
+static void
+del_conn(int idx)
+{
+	printf("Closing a connection.\n");
+
+	close(pfds[NUM_PORTALS + idx].fd);
+	
+	nconns--;
+	pfds[NUM_PORTALS + idx] = pfds[NUM_PORTALS + nconns];
+	struct ccb tmp = ccbs[idx];
+	ccbs[idx] = ccbs[nconns];
+	ccbs[nconns] = tmp;
 }
 
 #if 0
@@ -145,7 +176,7 @@ parse_http(const char *buf, const HTTP_Field *fields)
 static void
 teardown(void)
 {
-	for (int i = 0; i < NUM_PORTALS; i++) {
+	for (int i = 0; i < NUM_PORTALS + nconns; i++) {
 		close(pfds[i].fd);
 	}
 }
@@ -171,6 +202,39 @@ main(int argc, const char *argv[])
 				socklen_t addrlen;
 				int fd = accept(pfds[i].fd, (void *) &addr, &addrlen);
 				add_conn(fd, &addr, addrlen);
+			}
+		}
+
+		for (int i = 0; i < nconns; i++) {
+			if (pfds[NUM_PORTALS + i].revents) {
+				printf("fd event: %hd\n", pfds[NUM_PORTALS + i].revents);
+				if (pfds[NUM_PORTALS + i].revents & POLLERR) {
+					del_conn(i);
+					i--;
+					continue;
+				}
+				if (pfds[NUM_PORTALS + i].revents & POLLIN) {
+					char buf[1000];
+					int ret = recv(pfds[NUM_PORTALS + i].fd, buf, 1000, 0);
+					if (!ret) {
+						del_conn(i);
+						i--;
+						continue;
+					}
+					if (ret < 0) {
+						switch (errno) {
+#if EAGAIN != EWOULDBLOCK
+						case EAGAIN:
+#endif
+						case EWOULDBLOCK:
+							break;
+						default:
+							del_conn(i);
+							i--;
+							continue;
+						}
+					}
+				}
 			}
 		}
 	}
