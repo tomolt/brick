@@ -22,14 +22,16 @@ enum phase {
 struct ccb {
 	struct sockaddr_storage addr;
 	socklen_t addrlen;
-	struct tls *tls;
-	enum phase phase;
 	size_t progress;
+	enum phase phase;
 };
 
 static int nconns;
-static struct pollfd pfds[NUM_PORTALS + MAX_CONNS];
-static struct ccb ccbs[MAX_CONNS];
+
+static struct pollfd all_pfds[NUM_PORTALS + MAX_CONNS];
+
+static struct ccb     conn_blks[MAX_CONNS];
+static struct pollfd *conn_pfds = all_pfds + NUM_PORTALS;
 
 static void
 usage(void)
@@ -95,13 +97,14 @@ add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 
 	fcntl(fd, F_SETFL, O_NONBLOCK);
 
+	struct ccb blk = { 0 };
+	memcpy(&blk.addr, addr, addrlen);
+	blk.addrlen = addrlen;
+
 	int idx = nconns++;
-	memcpy(&ccbs[idx].addr, addr, addrlen);
-	ccbs[idx].addrlen = addrlen;
-	ccbs[idx].phase = REQUEST;
-	ccbs[idx].progress = 0;
-	pfds[NUM_PORTALS + idx].fd = fd;
-	pfds[NUM_PORTALS + idx].events = POLLIN;
+	conn_blks[idx] = blk;
+	conn_pfds[idx].fd = fd;
+	conn_pfds[idx].events = POLLIN;
 }
 
 static void
@@ -109,13 +112,11 @@ del_conn(int idx)
 {
 	printf("Closing a connection.\n");
 
-	close(pfds[NUM_PORTALS + idx].fd);
+	close(conn_pfds[idx].fd);
 	
 	nconns--;
-	pfds[NUM_PORTALS + idx] = pfds[NUM_PORTALS + nconns];
-	struct ccb tmp = ccbs[idx];
-	ccbs[idx] = ccbs[nconns];
-	ccbs[nconns] = tmp;
+	conn_pfds[idx] = conn_pfds[nconns];
+	conn_blks[idx] = conn_blks[nconns];
 }
 
 #if 0
@@ -176,8 +177,11 @@ parse_http(const char *buf, const HTTP_Field *fields)
 static void
 teardown(void)
 {
-	for (int i = 0; i < NUM_PORTALS + nconns; i++) {
-		close(pfds[i].fd);
+	for (int i = 0; i < NUM_PORTALS; i++) {
+		close(all_pfds[i].fd);
+	}
+	for (int i = 0; i < nconns; i++) {
+		close(conn_pfds[i].fd);
 	}
 }
 
@@ -189,33 +193,33 @@ main(int argc, const char *argv[])
 		exit(1);
 	}
 
-	pfds[0].fd     = open_portal(argv[1], argv[2]);
-	pfds[0].events = POLLIN;
+	all_pfds[0].fd     = open_portal(argv[1], argv[2]);
+	all_pfds[0].events = POLLIN;
 
 	for (;;) {
-		int n = poll(pfds, NUM_PORTALS + nconns, -1);
+		int n = poll(all_pfds, NUM_PORTALS + nconns, -1);
 		if (n < 0) continue;
 
 		for (int i = 0; i < NUM_PORTALS; i++) {
-			if (pfds[i].revents & POLLIN) {
+			if (all_pfds[i].revents & POLLIN) {
 				struct sockaddr_storage addr;
 				socklen_t addrlen;
-				int fd = accept(pfds[i].fd, (void *) &addr, &addrlen);
+				int fd = accept(all_pfds[i].fd, (void *) &addr, &addrlen);
 				add_conn(fd, &addr, addrlen);
 			}
 		}
 
 		for (int i = 0; i < nconns; i++) {
-			if (pfds[NUM_PORTALS + i].revents) {
-				printf("fd event: %hd\n", pfds[NUM_PORTALS + i].revents);
-				if (pfds[NUM_PORTALS + i].revents & POLLERR) {
+			if (conn_pfds[i].revents) {
+				printf("fd event: %hd\n", conn_pfds[i].revents);
+				if (conn_pfds[i].revents & POLLERR) {
 					del_conn(i);
 					i--;
 					continue;
 				}
-				if (pfds[NUM_PORTALS + i].revents & POLLIN) {
+				if (conn_pfds[i].revents & POLLIN) {
 					char buf[1000];
-					int ret = recv(pfds[NUM_PORTALS + i].fd, buf, 1000, 0);
+					int ret = recv(conn_pfds[i].fd, buf, 1000, 0);
 					if (!ret) {
 						del_conn(i);
 						i--;
