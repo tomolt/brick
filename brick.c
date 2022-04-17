@@ -174,6 +174,30 @@ parse_http(const char *buf, const HTTP_Field *fields)
 }
 #endif
 
+static int
+process_conn(int idx, int revents)
+{
+	printf("fd event: %hd\n", revents);
+	if (revents & POLLERR) return -1;
+	if (revents & POLLIN) {
+		char buf[1000];
+		int ret = recv(conn_pfds[idx].fd, buf, 1000, 0);
+		if (!ret) return -1;
+		if (ret < 0) {
+			switch (errno) {
+#if EAGAIN != EWOULDBLOCK
+			case EAGAIN:
+#endif
+			case EWOULDBLOCK:
+				break;
+			default:
+				return -1;
+			}
+		}
+	}
+	return 0;
+}
+
 static void
 teardown(void)
 {
@@ -211,33 +235,10 @@ main(int argc, const char *argv[])
 
 		for (int i = 0; i < nconns; i++) {
 			if (conn_pfds[i].revents) {
-				printf("fd event: %hd\n", conn_pfds[i].revents);
-				if (conn_pfds[i].revents & POLLERR) {
+				if (process_conn(i, conn_pfds[i].revents) < 0) {
 					del_conn(i);
 					i--;
 					continue;
-				}
-				if (conn_pfds[i].revents & POLLIN) {
-					char buf[1000];
-					int ret = recv(conn_pfds[i].fd, buf, 1000, 0);
-					if (!ret) {
-						del_conn(i);
-						i--;
-						continue;
-					}
-					if (ret < 0) {
-						switch (errno) {
-#if EAGAIN != EWOULDBLOCK
-						case EAGAIN:
-#endif
-						case EWOULDBLOCK:
-							break;
-						default:
-							del_conn(i);
-							i--;
-							continue;
-						}
-					}
 				}
 			}
 		}
