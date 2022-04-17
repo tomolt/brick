@@ -33,6 +33,7 @@ struct conn {
 	size_t length;
 	enum phase phase;
 	int sock;
+	int src;
 };
 
 static int nconns;
@@ -98,6 +99,48 @@ open_portal(const char *host, const char *port)
 
 	freeaddrinfo(ai);
 	return fd;
+}
+
+static int
+recv_some(int fd, char *buf, size_t *len, size_t max)
+{
+	if (*len == max) return -1;
+	for (;;) {
+		ssize_t n = recv(fd, buf + *len, max - *len, 0);
+		if (!n) return -1;
+		if (n > 0) {
+			*len += n;
+			return 0;
+		}
+		switch (errno) {
+		case EINTR: continue;
+#if EAGAIN != EWOULDBLOCK
+		case EAGAIN:
+#endif
+		case EWOULDBLOCK: return 0;
+		default: return -1;
+		}
+	}
+}
+
+static int
+send_some(int fd, const char *buf, size_t *off, size_t len)
+{
+	for (;;) {
+		ssize_t n = send(fd, buf + *off, len - *off, 0);
+		if (n >= 0) {
+			*off += n;
+			return 0;
+		}
+		switch (errno) {
+		case EINTR: continue;
+#if EAGAIN != EWOULDBLOCK
+		case EAGAIN:
+#endif
+		case EWOULDBLOCK: return 0;
+		default: return -1;
+		}
+	}
 }
 
 static void
@@ -207,10 +250,17 @@ process_request(int idx)
 {
 	printf("Requested path: %s\n", req_path);
 	struct conn *conn = &conns[idx];
+
+	/*conn->src = open(req_path, O_RDONLY);
+	// TODO 404
+	struct stat meta;
+	// TODO err check
+	fstat(conn->src, &meta);*/
+
 	conn->phase  = RESPONSE;
 	conn->offset = 0;
 	conn->length = snprintf(conn->scratch, SCRATCH,
-		"HTTP/1.1 404 Not Found\r\n"
+		"HTTP/1.1 200 OK\r\n"
 		"Server: brick\r\n"
 		"Content-Length: 0\r\n"
 		"\r\n");
@@ -220,66 +270,33 @@ process_request(int idx)
 static int
 process_conn(int idx, int revents)
 {
-	struct conn *conn = &conns[idx];
-	ssize_t ret;
-
 	if (revents & POLLERR) return -1;
 
+	struct conn *conn = &conns[idx];
 	switch (conn->phase) {
 	case REQUEST:
 		if (!(revents & POLLIN)) return 0;
-		if (conn->length == SCRATCH) return -1;
-retry_recv:
-		ret = recv(conn->sock, conn->scratch + conn->length, SCRATCH - conn->length, 0);
-		if (!ret) return -1;
-		if (ret < 0) {
-			switch (errno) {
-			case EINTR:
-				goto retry_recv;
-#if EAGAIN != EWOULDBLOCK
-			case EAGAIN:
-#endif
-			case EWOULDBLOCK:
-				return 0;
-			default:
-				return -1;
-			}
-		}
-		conn->length += ret;
+		if (recv_some(conn->sock, conn->scratch, &conn->length, SCRATCH) < 0) return -1;
 
-		if (conn->length < 4) return 0;
-		if (memcmp(conn->scratch + conn->length - 4, "\r\n\r\n", 4)) return 0;
-		conn->scratch[conn->length - 2] = 0;
-		printf("Received a request.\n");
-		if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
-		process_request(idx);
+		if (conn->length >= 4 && !memcmp(conn->scratch + conn->length - 4, "\r\n\r\n", 4)) {
+			conn->scratch[conn->length - 2] = 0;
+			printf("Received a request.\n");
+			if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
+			process_request(idx);
+		}
 		return 0;
 
 	case RESPONSE:
 		if (!(revents & POLLOUT)) return 0;
-retry_send:
-		ret = send(conn->sock, conn->scratch + conn->offset, conn->length - conn->offset, 0);
-		if (ret < 0) {
-			switch (errno) {
-			case EINTR:
-				goto retry_send;
-#if EAGAIN != EWOULDBLOCK
-			case EAGAIN:
-#endif
-			case EWOULDBLOCK:
-				return 0;
-			default:
-				return -1;
-			}
-		}
-		conn->offset += ret;
+		if (send_some(conn->sock, conn->scratch, &conn->offset, conn->length) < 0) return -1;
 
-		if (conn->offset == conn->length) return 0;
-		printf("Sent a response.\n");
-		conn->phase  = REQUEST;
-		conn->offset = 0;
-		conn->length = 0;
-		conn_pfds[idx].events = POLLIN;
+		if (conn->offset == conn->length) {
+			printf("Sent a response.\n");
+			conn->phase  = REQUEST;
+			conn->offset = 0;
+			conn->length = 0;
+			conn_pfds[idx].events = POLLIN;
+		}
 		return 0;
 
 	case PAYLOAD:
