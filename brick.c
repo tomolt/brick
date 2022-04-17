@@ -13,6 +13,7 @@
 #define NUM_PORTALS 1
 #define MAX_CONNS   2
 #define BACKLOG     128
+#define SCRATCH     2048
 
 enum phase {
 	REQUEST, RESPONSE, PAYLOAD
@@ -32,6 +33,7 @@ static struct pollfd all_pfds[NUM_PORTALS + MAX_CONNS];
 
 static struct ccb     conn_blks[MAX_CONNS];
 static struct pollfd *conn_pfds = all_pfds + NUM_PORTALS;
+static char         **conn_scratch[MAX_CONNS];
 
 static void
 usage(void)
@@ -177,25 +179,48 @@ parse_http(const char *buf, const HTTP_Field *fields)
 static int
 process_conn(int idx, int revents)
 {
+	int ret;
+
 	printf("fd event: %hd\n", revents);
 	if (revents & POLLERR) return -1;
-	if (revents & POLLIN) {
-		char buf[1000];
-		int ret = recv(conn_pfds[idx].fd, buf, 1000, 0);
+
+	switch (conn_blks[idx].phase) {
+	case REQUEST:
+		if (!(revents & POLLIN)) return 0;
+		if (conn_blks[idx].progress >= SCRATCH) return -1;
+retry_recv:
+		ret = recv(conn_pfds[idx].fd, conn_scratch[idx], SCRATCH - conn_blks[idx].progress, 0);
 		if (!ret) return -1;
 		if (ret < 0) {
 			switch (errno) {
+			case EINTR:
+				goto retry_recv;
 #if EAGAIN != EWOULDBLOCK
 			case EAGAIN:
 #endif
 			case EWOULDBLOCK:
-				break;
+				return 0;
 			default:
 				return -1;
 			}
 		}
+		conn_blks[idx].progress += ret;
+
+		//if (conn_blks[idx].progress < 4) return 0;
+		//if (memcmp(conn_scratch[idx])) return 0;
+
+
+		return 0;
+
+	case RESPONSE:
+		return 0;
+
+	case PAYLOAD:
+		return 0;
+
+	default:
+		return -1;
 	}
-	return 0;
 }
 
 static void
@@ -206,6 +231,9 @@ teardown(void)
 	}
 	for (int i = 0; i < nconns; i++) {
 		close(conn_pfds[i].fd);
+	}
+	for (int i = 0; i < MAX_CONNS; i++) {
+		free(conn_scratch[i]);
 	}
 }
 
@@ -219,6 +247,14 @@ main(int argc, const char *argv[])
 
 	all_pfds[0].fd     = open_portal(argv[1], argv[2]);
 	all_pfds[0].events = POLLIN;
+
+	for (int i = 0; i < MAX_CONNS; i++) {
+		conn_scratch[i] = malloc(SCRATCH);
+		if (!conn_scratch[i]) {
+			fprintf(stderr, "malloc: %s\n", strerror(errno));
+			exit(1);
+		}
+	}
 
 	for (;;) {
 		int n = poll(all_pfds, NUM_PORTALS + nconns, -1);
