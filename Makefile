@@ -2,6 +2,7 @@ CC=gcc
 LD=gcc
 CFLAGS=-Os -Wall -Wextra -pedantic
 LDFLAGS=-Os
+LIBS=-ltls
 
 .PHONY: all clean
 
@@ -12,7 +13,7 @@ clean:
 	rm -f brick
 
 brick: brick.o
-	$(LD) $(LDFLAGS) $^ -o $@
+	$(LD) $(LDFLAGS) $^ -o $@ $(LIBS)
 
 brick.o: brick.c
 	$(CC) $(CFLAGS) -c $^ -o $@
