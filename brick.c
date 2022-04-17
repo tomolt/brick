@@ -29,7 +29,8 @@ struct conn {
 	char *scratch;
 	struct sockaddr_storage addr;
 	socklen_t addrlen;
-	size_t progress;
+	size_t offset;
+	size_t length;
 	enum phase phase;
 	int sock;
 };
@@ -206,8 +207,9 @@ process_request(int idx)
 {
 	printf("Requested path: %s\n", req_path);
 	struct conn *conn = &conns[idx];
-	conn->phase = RESPONSE;
-	conn->progress = snprintf(conn->scratch, SCRATCH,
+	conn->phase  = RESPONSE;
+	conn->offset = 0;
+	conn->length = snprintf(conn->scratch, SCRATCH,
 		"HTTP/1.1 404 Not Found\r\n"
 		"Server: brick\r\n"
 		"Content-Length: 0\r\n"
@@ -226,9 +228,9 @@ process_conn(int idx, int revents)
 	switch (conn->phase) {
 	case REQUEST:
 		if (!(revents & POLLIN)) return 0;
-		if (conn->progress >= SCRATCH) return -1;
+		if (conn->length == SCRATCH) return -1;
 retry_recv:
-		ret = recv(conn->sock, conn->scratch + conn->progress, SCRATCH - conn->progress, 0);
+		ret = recv(conn->sock, conn->scratch + conn->length, SCRATCH - conn->length, 0);
 		if (!ret) return -1;
 		if (ret < 0) {
 			switch (errno) {
@@ -243,11 +245,11 @@ retry_recv:
 				return -1;
 			}
 		}
-		conn->progress += ret;
+		conn->length += ret;
 
-		if (conn->progress < 4) return 0;
-		if (memcmp(conn->scratch + conn->progress - 4, "\r\n\r\n", 4)) return 0;
-		conn->scratch[conn->progress - 2] = 0;
+		if (conn->length < 4) return 0;
+		if (memcmp(conn->scratch + conn->length - 4, "\r\n\r\n", 4)) return 0;
+		conn->scratch[conn->length - 2] = 0;
 		printf("Received a request.\n");
 		if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
 		process_request(idx);
@@ -256,7 +258,7 @@ retry_recv:
 	case RESPONSE:
 		if (!(revents & POLLOUT)) return 0;
 retry_send:
-		ret = send(conn->sock, conn->scratch, conn->progress, 0);
+		ret = send(conn->sock, conn->scratch + conn->offset, conn->length - conn->offset, 0);
 		if (ret < 0) {
 			switch (errno) {
 			case EINTR:
@@ -270,13 +272,13 @@ retry_send:
 				return -1;
 			}
 		}
-		conn->progress -= ret;
-		memmove(conn->scratch, conn->scratch + ret, conn->progress - ret);
+		conn->offset += ret;
 
-		if (conn->progress) return 0;
+		if (conn->offset == conn->length) return 0;
 		printf("Sent a response.\n");
-		conn->phase = REQUEST;
-		conn->progress = 0;
+		conn->phase  = REQUEST;
+		conn->offset = 0;
+		conn->length = 0;
 		conn_pfds[idx].events = POLLIN;
 		return 0;
 
