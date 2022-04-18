@@ -168,7 +168,8 @@ add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 	int idx = nconns;
 	struct conn *conn = &conns[idx];
 
-	fcntl(fd, F_SETFL, O_NONBLOCK);
+	int flags = fcntl(fd, F_GETFL, 0);
+	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 #if BRICK_TLS
 	if (tls_accept_socket(portal_tls, &conn->tls, fd) < 0) {
 		// TODO warning
