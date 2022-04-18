@@ -144,6 +144,9 @@ open_portal(const char *host, const char *port)
 		exit(1);
 	}
 
+	int flags = fcntl(fd, F_GETFL, 0);
+	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
 	if (listen(fd, BACKLOG) < 0) {
 		fprintf(stderr, "listen: %s\n", strerror(errno));
 		exit(1);
@@ -206,31 +209,6 @@ evict(void)
 	return evicted;
 }
 
-static int
-set_conn(int idx, int fd, const struct sockaddr_storage *addr, socklen_t addrlen)
-{
-	struct conn *conn = &conns[idx];
-
-	int flags = fcntl(fd, F_GETFL, 0);
-	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-#if BRICK_TLS
-	if (tls_accept_socket(portal_tls, &conn->tls, fd) < 0) {
-		// TODO warning
-		close(fd);
-		return -1;
-	}
-#endif
-
-	memcpy(&conn->addr, addr, addrlen);
-	conn->sock = fd;
-	conn->src = -1;
-
-	conn_pfds[idx].fd = fd;
-	conn_pfds[idx].events = POLLIN;
-	
-	return 0;
-}
-
 static void
 clr_conn(int idx)
 {
@@ -240,19 +218,6 @@ clr_conn(int idx)
 #if BRICK_TLS
 	tls_free(conn->tls);
 #endif
-}
-
-static void
-add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
-{
-	if (nconns >= MAX_CONNS) {
-		printf("Rejecting a connection.\n");
-		close(fd);
-		return;
-	}
-	printf("Accepted a new connection.\n");
-	if (set_conn(nconns, fd, addr, addrlen) < 0) return;
-	nconns++;
 }
 
 static void
@@ -269,6 +234,43 @@ del_conn(int idx)
 
 	memset(&conns[nconns], 0, sizeof (struct conn));
 	conns[nconns].scratch = scratch;
+}
+
+static int
+set_conn(int idx, int fd, const struct sockaddr_storage *addr, socklen_t addrlen)
+{
+	struct conn *conn = &conns[idx];
+
+	int flags = fcntl(fd, F_GETFL, 0);
+	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#if BRICK_TLS
+	if (tls_accept_socket(portal_tls, &conn->tls, fd) < 0) {
+		fprintf(stderr, "tls_accept: %s (non-fatal)\n", tls_error(portal_tls));
+		close(fd);
+		return -1;
+	}
+#endif
+
+	memcpy(&conn->addr, addr, addrlen);
+	conn->sock = fd;
+	conn->src = -1;
+
+	conn_pfds[idx].fd      = fd;
+	conn_pfds[idx].events  = POLLIN;
+	conn_pfds[idx].revents = 0;
+	
+	return 0;
+}
+
+static void
+add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
+{
+	printf("Accepted a new connection.\n");
+	if (nconns >= MAX_CONNS) {
+		del_conn(evict());
+	}
+	if (set_conn(nconns, fd, addr, addrlen) < 0) return;
+	nconns++;
 }
 
 static int
@@ -667,10 +669,13 @@ main(int argc, const char **argv)
 		if (n < 0) continue;
 
 		if (all_pfds[0].revents & POLLIN) {
-			struct sockaddr_storage addr;
-			socklen_t addrlen = sizeof addr;
-			int fd = accept(all_pfds[0].fd, (void *) &addr, &addrlen);
-			add_conn(fd, &addr, addrlen);
+			for (;;) {
+				struct sockaddr_storage addr;
+				socklen_t addrlen = sizeof addr;
+				int fd = accept(all_pfds[0].fd, (void *) &addr, &addrlen);
+				if (fd < 0) break;
+				add_conn(fd, &addr, addrlen);
+			}
 		}
 
 		for (int i = 0; i < nconns; i++) {
