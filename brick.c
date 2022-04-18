@@ -377,11 +377,6 @@ process_request(int idx)
 		return 0;
 	}
 
-	struct stat meta;
-	fstat(conn->src, &meta);
-	// TODO err check
-	conn->content_length = meta.st_size;
-
 	const char *mime = "application/octet-stream";
 	size_t pathlen = strlen(req_path);
 	for (int i = 0; mime_types[i]; i += 2) {
@@ -392,6 +387,28 @@ process_request(int idx)
 			break;
 		}
 	}
+
+	struct stat meta;
+	fstat(conn->src, &meta);
+	// TODO err check
+	if (S_ISDIR(meta.st_mode)) {
+		int fd = openat(conn->src, "index.html", O_RDONLY);
+		close(conn->src);
+		conn->src = fd;
+		if (conn->src < 0) {
+			conn->length = snprintf(conn->scratch, SCRATCH,
+				"HTTP/1.1 404 Not Found\r\n"
+				"Server: brick\r\n"
+				"Content-Type: text/plain\r\n"
+				"Content-Length: 13\r\n"
+				"\r\n"
+				"404 Not Found");
+			return 0;
+		}
+		fstat(conn->src, &meta);
+		mime = "text/html;charset=UTF-8";
+	}
+	conn->content_length = meta.st_size;
 
 	conn->length = snprintf(conn->scratch, SCRATCH,
 		"HTTP/1.1 200 OK\r\n"
