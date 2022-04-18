@@ -42,7 +42,6 @@ struct conn {
 	struct tls *tls;
 #endif
 	struct sockaddr_storage addr;
-	socklen_t addrlen;
 	size_t offset;
 	size_t length;
 	size_t content_length;
@@ -154,18 +153,62 @@ open_portal(const char *host, const char *port)
 	return fd;
 }
 
-static void
-add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
+static int
+same_addr(const struct sockaddr_storage *a, const struct sockaddr_storage *b)
 {
-	if (nconns >= MAX_CONNS) {
-		printf("Rejecting a connection.\n");
-		close(fd);
-		return;
+	if (a->ss_family != b->ss_family) return 0;
+	switch (a->ss_family) {
+	case AF_INET:
+		return ((struct sockaddr_in *) a)->sin_addr.s_addr ==
+			((struct sockaddr_in *) b)->sin_addr.s_addr;
+	default: /* AF_INET6 */
+		return memcmp(((struct sockaddr_in6 *) a)->sin6_addr.s6_addr,
+			((struct sockaddr_in6 *) b)->sin6_addr.s6_addr,
+			sizeof (((struct sockaddr_in6 *) a)->sin6_addr.s6_addr));
 	}
+}
 
-	printf("Accepted a new connection.\n");
+static int
+evict(void)
+{
+	int evicted = -1;
+	int maxcnt = 0;
+	for (int i = 0; i < nconns; i++) {
+		int sel = i, cnt = 0;
+		for (int j = 0; j < nconns; j++) {
+			if (!same_addr(&conns[sel].addr, &conns[j].addr)) continue;
+			cnt++;
+			if (conns[j].phase < conns[sel].phase) {
+				sel = j;
+			} else if (conns[j].phase == conns[sel].phase) {
+				int swap = 0;
+				switch (conns[sel].phase) {
+				case REQUEST:
+					swap = conns[j].length < conns[sel].length;
+					break;
+				case RESPONSE:
+					/* TODO prioritize status 200 responses */
+					swap = (conns[j].length - conns[j].offset) >
+						(conns[sel].length - conns[sel].offset);
+					break;
+				case PAYLOAD:
+					swap = conns[j].content_length > conns[sel].content_length;
+					break;
+				}
+				if (swap) sel = j;
+			}
+		}
+		if (cnt > maxcnt) {
+			evicted = sel;
+			maxcnt = cnt;
+		}
+	}
+	return evicted;
+}
 
-	int idx = nconns;
+static int
+set_conn(int idx, int fd, const struct sockaddr_storage *addr, socklen_t addrlen)
+{
 	struct conn *conn = &conns[idx];
 
 	int flags = fcntl(fd, F_GETFL, 0);
@@ -174,18 +217,41 @@ add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 	if (tls_accept_socket(portal_tls, &conn->tls, fd) < 0) {
 		// TODO warning
 		close(fd);
-		return;
+		return -1;
 	}
 #endif
 
 	memcpy(&conn->addr, addr, addrlen);
-	conn->addrlen = addrlen;
 	conn->sock = fd;
 	conn->src = -1;
 
 	conn_pfds[idx].fd = fd;
 	conn_pfds[idx].events = POLLIN;
+	
+	return 0;
+}
 
+static void
+clr_conn(int idx)
+{
+	struct conn *conn = &conns[idx];
+	close(conn->sock);
+	if (!(conn->src < 0)) close(conn->src);
+#if BRICK_TLS
+	tls_free(conn->tls);
+#endif
+}
+
+static void
+add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
+{
+	if (nconns >= MAX_CONNS) {
+		printf("Rejecting a connection.\n");
+		close(fd);
+		return;
+	}
+	printf("Accepted a new connection.\n");
+	if (set_conn(nconns, fd, addr, addrlen) < 0) return;
 	nconns++;
 }
 
@@ -194,13 +260,8 @@ del_conn(int idx)
 {
 	printf("Closing a connection.\n");
 
-	struct conn *conn = &conns[idx];
-	char *scratch = conn->scratch;
-	close(conn->sock);
-	if (!(conn->src < 0)) close(conn->src);
-#if BRICK_TLS
-	tls_free(conn->tls);
-#endif
+	char *scratch = conns[idx].scratch;
+	clr_conn(idx);
 	
 	nconns--;
 	conns[idx] = conns[nconns];
@@ -541,9 +602,9 @@ reconfigure(void)
 	if (portal_tls) tls_reset(portal_tls);
 	else portal_tls = tls_server();
 	struct tls_config *tls_cfg = tls_config_new();
-	tls_config_set_ca_file(tls_cfg, args[3]);
+	tls_config_set_ca_file  (tls_cfg, args[3]);
 	tls_config_set_cert_file(tls_cfg, args[4]);
-	tls_config_set_key_file(tls_cfg, args[5]);
+	tls_config_set_key_file (tls_cfg, args[5]);
 	tls_configure(portal_tls, tls_cfg);
 	tls_config_free(tls_cfg);
 #endif
@@ -556,14 +617,8 @@ teardown(void)
 #if BRICK_TLS
 	tls_free(portal_tls);
 #endif
-
-	for (int i = nconns; i--;) {
-		del_conn(i);
-	}
-
-	for (int i = 0; i < MAX_CONNS; i++) {
-		free(conns[i].scratch);
-	}
+	for (int i = nconns; i--;) del_conn(i);
+	for (int i = 0; i < MAX_CONNS; i++) free(conns[i].scratch);
 }
 
 int
