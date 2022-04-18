@@ -368,46 +368,40 @@ sanitize_path(char *path)
 	return 0;
 }
 
+static const char *
+name_of_code(int code)
+{
+	switch (code) {
+	case 200: return "OK";
+	case 400: return "Bad Request";
+	case 404: return "File Not Found";
+	default:  return "";
+	}
+}
+
 static int
-process_request(int idx)
+load_content(int idx, const char **mime)
 {
 	struct conn *conn = &conns[idx];
 	conn->content_length = 0;
+	*mime = "text/plain";
 
 	if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
 	printf("Requested path: %s\n", req_path);
 
-	if (sanitize_path(req_path) < 0) {
-		conn->length = snprintf(conn->scratch, SCRATCH,
-			"HTTP/1.1 400 Bad Request\r\n"
-			"Server: brick\r\n"
-			"Content-Type: text/plain\r\n"
-			"Content-Length: 15\r\n"
-			"\r\n"
-			"400 Bad Request");
-		return 0;
-	}
+	if (sanitize_path(req_path) < 0) return 400;
 	printf("Sanitized path: %s\n", req_path);
 
 	conn->src = open(req_path, O_RDONLY);
-	if (conn->src < 0) {
-		conn->length = snprintf(conn->scratch, SCRATCH,
-			"HTTP/1.1 404 Not Found\r\n"
-			"Server: brick\r\n"
-			"Content-Type: text/plain\r\n"
-			"Content-Length: 13\r\n"
-			"\r\n"
-			"404 Not Found");
-		return 0;
-	}
+	if (conn->src < 0) return 404;
 
-	const char *mime = "application/octet-stream";
+	*mime = "application/octet-stream";
 	size_t pathlen = strlen(req_path);
 	for (int i = 0; mime_types[i]; i += 2) {
 		size_t len = strlen(mime_types[i]);
 		if (pathlen < len) continue;
 		if (!strcmp(req_path + pathlen - len, mime_types[i])) {
-			mime = mime_types[i+1];
+			*mime = mime_types[i+1];
 			break;
 		}
 	}
@@ -419,20 +413,21 @@ process_request(int idx)
 		int fd = openat(conn->src, "index.html", O_RDONLY);
 		close(conn->src);
 		conn->src = fd;
-		if (conn->src < 0) {
-			conn->length = snprintf(conn->scratch, SCRATCH,
-				"HTTP/1.1 404 Not Found\r\n"
-				"Server: brick\r\n"
-				"Content-Type: text/plain\r\n"
-				"Content-Length: 13\r\n"
-				"\r\n"
-				"404 Not Found");
-			return 0;
-		}
+		if (conn->src < 0) return 404;
 		fstat(conn->src, &meta);
-		mime = "text/html;charset=UTF-8";
+		*mime = "text/html;charset=UTF-8";
 	}
 	conn->content_length = meta.st_size;
+
+	return 200;
+}
+
+static int
+process_request(int idx)
+{
+	const char *mime;
+	int code = load_content(idx, &mime);
+	if (code < 0) return -1;
 
 	char date[50];
 	time_t t = time(NULL);
@@ -440,13 +435,28 @@ process_request(int idx)
 	gmtime_r(&t, &tm);
 	strftime(date, sizeof date, "%a, %d %b %Y %T GMT", &tm);
 
+	struct conn *conn = &conns[idx];
 	conn->length = snprintf(conn->scratch, SCRATCH,
-		"HTTP/1.1 200 OK\r\n"
+		"HTTP/1.1 %03d %s\r\n"
 		"Server: brick\r\n"
 		"Date: %s\r\n"
-		"Content-Type: %s\r\n"
-		"Content-Length: %llu\r\n"
-		"\r\n", date, mime, (long long unsigned) conn->content_length);
+		"Content-Type: %s\r\n",
+		code, name_of_code(code), date, mime);
+
+	if (code == 200) {
+		conn->length += snprintf(conn->scratch + conn->length, SCRATCH - conn->length,
+			"Content-Length: %llu\r\n"
+			"\r\n",
+			(long long unsigned) conn->content_length);
+	} else {
+		const char *msg = name_of_code(code);
+		conn->length += snprintf(conn->scratch + conn->length, SCRATCH - conn->length,
+			"Content-Length: %llu\r\n"
+			"\r\n"
+			"%03d %s",
+			(long long unsigned) (4 + strlen(msg)), code, msg);
+	}
+
 	return 0;
 }
 
