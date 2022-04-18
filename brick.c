@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
@@ -23,6 +24,9 @@
 #define SCRATCH     2048
 #define MAX_PATH    200
 #define MAX_HEADER  200
+
+#define SHUTDOWN    0x1
+#define RECONFIGURE 0x2
 
 enum phase {
 	REQUEST, RESPONSE, PAYLOAD
@@ -43,6 +47,7 @@ struct conn {
 	int src;
 };
 
+static volatile int global_flags;
 static int nconns;
 
 static struct pollfd  all_pfds[NUM_PORTALS + MAX_CONNS];
@@ -70,11 +75,11 @@ static void
 usage(void)
 {
 #if BRICK_TLS
-	printf("usage: brick [host] [port]"
+	printf("usage: bricks [host] [port]"
 		" [ca-file] [cert-file] [key-file]"
 		"\n");
 #else
-	printf("usage: bricks [host] [port]"
+	printf("usage: brick [host] [port]"
 		"\n");
 #endif
 }
@@ -445,6 +450,16 @@ teardown(void)
 	}
 }
 
+static void
+signal_handler(int sig)
+{
+	switch (sig) {
+	case SIGINT:
+	case SIGTERM: global_flags |= SHUTDOWN; break;
+	case SIGUSR1: global_flags |= RECONFIGURE; break;
+	}
+}
+
 int
 main(int argc, const char *argv[])
 {
@@ -463,7 +478,7 @@ main(int argc, const char *argv[])
 	tls_configure(portal_tls, tls_cfg);
 	tls_config_free(tls_cfg);
 #else
-	if (argc != 2) {
+	if (argc != 3) {
 		usage();
 		exit(1);
 	}
@@ -471,6 +486,12 @@ main(int argc, const char *argv[])
 
 	all_pfds[0].fd     = open_portal(argv[1], argv[2]);
 	all_pfds[0].events = POLLIN;
+
+	struct sigaction sa = { 0 };
+	sa.sa_handler = signal_handler;
+	sigaction(SIGINT,  &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGUSR1, &sa, NULL);
 
 	for (int i = 0; i < MAX_CONNS; i++) {
 		conns[i].scratch = malloc(SCRATCH);
@@ -480,9 +501,16 @@ main(int argc, const char *argv[])
 		}
 	}
 
-	for (;;) {
+	while (!(global_flags & SHUTDOWN)) {
 		int n = poll(all_pfds, NUM_PORTALS + nconns, -1);
-		if (n < 0) continue;
+
+		if (n < 0) {
+			if (global_flags & RECONFIGURE) {
+				printf("Reconfiguring.\n");
+				global_flags &= ~RECONFIGURE;
+			}
+			continue;
+		}
 
 		if (all_pfds[0].revents & POLLIN) {
 			struct sockaddr_storage addr;

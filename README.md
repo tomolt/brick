@@ -5,10 +5,9 @@ To Dos
 - man pages?
 - `Connection: close`
 - Byte Serving / `Range:`
-- Good default values
+- Good default values & more MIME types
 - Outputting `Date:`
 - DoS protection
-- Clean shutdown
 - Serving index.html for directories
 - Reloading certificates on SIGUSR1
 
