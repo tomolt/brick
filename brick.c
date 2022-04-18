@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -151,48 +152,6 @@ open_portal(const char *host, const char *port)
 	return fd;
 }
 
-static int
-read_some(int fd, char *buf, size_t *len, size_t max)
-{
-	if (*len == max) return -1;
-	for (;;) {
-		ssize_t n = read(fd, buf + *len, max - *len);
-		if (!n) return -1;
-		if (n > 0) {
-			*len += n;
-			return 0;
-		}
-		switch (errno) {
-		case EINTR: continue;
-#if EAGAIN != EWOULDBLOCK
-		case EAGAIN:
-#endif
-		case EWOULDBLOCK: return 0;
-		default: return -1;
-		}
-	}
-}
-
-static int
-write_some(int fd, const char *buf, size_t *off, size_t len)
-{
-	for (;;) {
-		ssize_t n = write(fd, buf + *off, len - *off);
-		if (n >= 0) {
-			*off += n;
-			return 0;
-		}
-		switch (errno) {
-		case EINTR: continue;
-#if EAGAIN != EWOULDBLOCK
-		case EAGAIN:
-#endif
-		case EWOULDBLOCK: return 0;
-		default: return -1;
-		}
-	}
-}
-
 static void
 add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 {
@@ -252,8 +211,8 @@ static int
 conn_read(int idx)
 {
 	struct conn *conn = &conns[idx];
-#if BRICK_TLS
 	if (conn->length == SCRATCH) return -1;
+#if BRICK_TLS
 	ssize_t n = tls_read(conn->tls, conn->scratch + conn->length, SCRATCH - conn->length);
 	switch (n) {
 	case -1: return -1;
@@ -261,10 +220,25 @@ conn_read(int idx)
 	case TLS_WANT_POLLOUT: conn_pfds[idx].events = POLLOUT; break;
 	default: conn->length += n;
 	}
-#else
-	if (read_some(conn->sock, conn->scratch, &conn->length, SCRATCH) < 0) return -1;
-#endif
 	return 0;
+#else
+	for (;;) {
+		ssize_t n = read(conn->sock, conn->scratch + conn->length, SCRATCH - conn->length);
+		if (!n) return -1;
+		if (n > 0) {
+			conn->length += n;
+			return 0;
+		}
+		switch (errno) {
+		case EINTR: continue;
+#if EAGAIN != EWOULDBLOCK
+		case EAGAIN:
+#endif
+		case EWOULDBLOCK: return 0;
+		default: return -1;
+		}
+	}
+#endif
 }
 
 static int
@@ -279,10 +253,24 @@ conn_write(int idx)
 	case TLS_WANT_POLLOUT: conn_pfds[idx].events = POLLOUT; break;
 	default: conn->offset += n;
 	}
-#else
-	if (write_some(conn->sock, conn->scratch, &conn->offset, conn->length) < 0) return -1;
-#endif
 	return 0;
+#else
+	for (;;) {
+		ssize_t n = write(conn->sock, conn->scratch + conn->offset, conn->length - conn->offset);
+		if (n >= 0) {
+			conn->offset += n;
+			return 0;
+		}
+		switch (errno) {
+		case EINTR: continue;
+#if EAGAIN != EWOULDBLOCK
+		case EAGAIN:
+#endif
+		case EWOULDBLOCK: return 0;
+		default: return -1;
+		}
+	}
+#endif
 }
 
 static void
@@ -453,8 +441,18 @@ process_conn(int idx, int revents)
 
 		if (conn->offset == conn->length) {
 			conn->offset = 0;
-			conn->length = 0;
-			if (read_some(conn->src, conn->scratch, &conn->length, SCRATCH) < 0) return -1;
+			for (;;) {
+				ssize_t n = read(conn->src, conn->scratch, SCRATCH);
+				if (!n) return -1;
+				if (n > 0) {
+					conn->length = n;
+					break;
+				}
+				switch (errno) {
+				case EINTR: continue;
+				default: return -1;
+				}
+			}
 			conn->content_length -= conn->length;
 		}
 

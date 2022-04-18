@@ -2,6 +2,7 @@
 To Dos
 ------
 - `Connection: close`
+- Path validation
 - DoS protection
 - Proper Readme
 - Outputting `Date:`
