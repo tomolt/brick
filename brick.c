@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
+#include <locale.h>
+#include <time.h>
 #include <errno.h>
 
 #if BRICK_TLS
@@ -432,12 +434,19 @@ process_request(int idx)
 	}
 	conn->content_length = meta.st_size;
 
+	char date[50];
+	time_t t = time(NULL);
+	struct tm tm;
+	gmtime_r(&t, &tm);
+	strftime(date, sizeof date, "%a, %d %b %Y %T GMT", &tm);
+
 	conn->length = snprintf(conn->scratch, SCRATCH,
 		"HTTP/1.1 200 OK\r\n"
 		"Server: brick\r\n"
+		"Date: %s\r\n"
 		"Content-Type: %s\r\n"
 		"Content-Length: %llu\r\n"
-		"\r\n", mime, (long long unsigned) conn->content_length);
+		"\r\n", date, mime, (long long unsigned) conn->content_length);
 	return 0;
 }
 
@@ -549,6 +558,8 @@ teardown(void)
 int
 main(int argc, const char **argv)
 {
+	setlocale(LC_ALL, "C");
+
 	args = argv;
 	if (argc != NUM_ARGS) {
 		usage();
