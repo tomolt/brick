@@ -5,7 +5,6 @@ To Dos
 - man pages?
 - `Connection: close`
 - Byte Serving / `Range:`
-- TLS
 - Good default values
 - Outputting `Date:`
 - DoS protection

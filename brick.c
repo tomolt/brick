@@ -449,7 +449,7 @@ int
 main(int argc, const char *argv[])
 {
 #if BRICK_TLS
-	if (argc != 7) {
+	if (argc != 6) {
 		usage();
 		exit(1);
 	}
