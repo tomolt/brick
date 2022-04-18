@@ -61,7 +61,7 @@ static struct tls    *portal_tls;
 #endif
 
 static const char *req_keys[] = {
-	"Connection",
+	"Host",
 	NULL
 };
 
