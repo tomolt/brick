@@ -10,10 +10,12 @@
 #include <netdb.h>
 #include <poll.h>
 #include <errno.h>
-#include <tls.h>
+
+#if BRICK_TLS
+# include <tls.h>
+#endif
 
 #define MIN(a,b) ((a)<(b)?(a):(b))
-#define SWAP(t,a,b) do { t _tv=(a); (a)=(b); (b)=_tv; } while (0)
 
 #define NUM_PORTALS 1
 #define MAX_CONNS   2
@@ -28,6 +30,9 @@ enum phase {
 
 struct conn {
 	char *scratch;
+#if BRICK_TLS
+	struct tls *tls;
+#endif
 	struct sockaddr_storage addr;
 	socklen_t addrlen;
 	size_t offset;
@@ -43,6 +48,9 @@ static int nconns;
 static struct pollfd  all_pfds[NUM_PORTALS + MAX_CONNS];
 static struct conn    conns[MAX_CONNS];
 static struct pollfd *conn_pfds = all_pfds + NUM_PORTALS;
+#if BRICK_TLS
+static struct tls    *portal_tls;
+#endif
 
 static const char *req_keys[] = {
 	"Connection",
@@ -61,7 +69,14 @@ static const char *mime_types[] = {
 static void
 usage(void)
 {
-	printf("usage: brick [host] [port]\n");
+#if BRICK_TLS
+	printf("usage: brick [host] [port]"
+		" [ca-file] [cert-file] [key-file]"
+		"\n");
+#else
+	printf("usage: bricks [host] [port]"
+		"\n");
+#endif
 }
 
 static int
@@ -162,10 +177,17 @@ add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 
 	printf("Accepted a new connection.\n");
 
-	fcntl(fd, F_SETFL, O_NONBLOCK);
-
-	int idx = nconns++;
+	int idx = nconns;
 	struct conn *conn = &conns[idx];
+
+	fcntl(fd, F_SETFL, O_NONBLOCK);
+#if BRICK_TLS
+	if (tls_accept_socket(portal_tls, &conn->tls, fd) < 0) {
+		// TODO warning
+		close(fd);
+		return;
+	}
+#endif
 
 	memcpy(&conn->addr, addr, addrlen);
 	conn->addrlen = addrlen;
@@ -174,6 +196,8 @@ add_conn(int fd, struct sockaddr_storage *addr, socklen_t addrlen)
 
 	conn_pfds[idx].fd = fd;
 	conn_pfds[idx].events = POLLIN;
+
+	nconns++;
 }
 
 static void
@@ -185,6 +209,9 @@ del_conn(int idx)
 	char *scratch = conn->scratch;
 	close(conn->sock);
 	if (!(conn->src < 0)) close(conn->src);
+#if BRICK_TLS
+	tls_free(conn->tls);
+#endif
 	
 	nconns--;
 	conns[idx] = conns[nconns];
@@ -192,6 +219,43 @@ del_conn(int idx)
 
 	memset(&conns[nconns], 0, sizeof (struct conn));
 	conns[nconns].scratch = scratch;
+}
+
+static int
+conn_read(int idx)
+{
+	struct conn *conn = &conns[idx];
+#if BRICK_TLS
+	if (conn->length == SCRATCH) return -1;
+	ssize_t n = tls_read(conn->tls, conn->scratch + conn->length, SCRATCH - conn->length);
+	switch (n) {
+	case -1: return -1;
+	case TLS_WANT_POLLIN:  conn_pfds[idx].events = POLLIN;  break;
+	case TLS_WANT_POLLOUT: conn_pfds[idx].events = POLLOUT; break;
+	default: conn->length += n;
+	}
+#else
+	if (read_some(conn->sock, conn->scratch, &conn->length, SCRATCH) < 0) return -1;
+#endif
+	return 0;
+}
+
+static int
+conn_write(int idx)
+{
+	struct conn *conn = &conns[idx];
+#if BRICK_TLS
+	ssize_t n = tls_write(conn->tls, conn->scratch + conn->offset, conn->length - conn->offset);
+	switch (n) {
+	case -1: return -1;
+	case TLS_WANT_POLLIN:  conn_pfds[idx].events = POLLIN;  break;
+	case TLS_WANT_POLLOUT: conn_pfds[idx].events = POLLOUT; break;
+	default: conn->offset += n;
+	}
+#else
+	if (write_some(conn->sock, conn->scratch, &conn->offset, conn->length) < 0) return -1;
+#endif
+	return 0;
 }
 
 static void
@@ -320,7 +384,7 @@ process_conn(int idx, int revents)
 	switch (conn->phase) {
 	case REQUEST:
 		if (!(revents & POLLIN)) return 0;
-		if (read_some(conn->sock, conn->scratch, &conn->length, SCRATCH) < 0) return -1;
+		if (conn_read(idx) < 0) return -1;
 
 		if (conn->length >= 4 && !memcmp(conn->scratch + conn->length - 4, "\r\n\r\n", 4)) {
 			conn->scratch[conn->length - 2] = 0;
@@ -332,7 +396,7 @@ process_conn(int idx, int revents)
 
 	case RESPONSE:
 		if (!(revents & POLLOUT)) return 0;
-		if (write_some(conn->sock, conn->scratch, &conn->offset, conn->length) < 0) return -1;
+		if (conn_write(idx) < 0) return -1;
 
 		if (conn->offset == conn->length) {
 			printf("Sent a response.\n");
@@ -350,7 +414,7 @@ process_conn(int idx, int revents)
 			conn->content_length -= conn->length;
 		}
 
-		if (write_some(conn->sock, conn->scratch, &conn->offset, conn->length) < 0) return -1;
+		if (conn_write(idx) < 0) return -1;
 
 		if (conn->offset == conn->length && !conn->content_length) {
 			printf("Sent the payload.\n");
@@ -367,13 +431,15 @@ process_conn(int idx, int revents)
 static void
 teardown(void)
 {
-	for (int i = 0; i < NUM_PORTALS; i++) {
-		close(all_pfds[i].fd);
+	close(all_pfds[0].fd);
+#if BRICK_TLS
+	tls_free(portal_tls);
+#endif
+
+	for (int i = nconns; i--;) {
+		del_conn(i);
 	}
-	for (int i = 0; i < nconns; i++) {
-		close(conns[i].sock);
-		if (!(conns[i].src < 0)) close(conns[i].src);
-	}
+
 	for (int i = 0; i < MAX_CONNS; i++) {
 		free(conns[i].scratch);
 	}
@@ -382,10 +448,26 @@ teardown(void)
 int
 main(int argc, const char *argv[])
 {
-	if (argc != 3) {
+#if BRICK_TLS
+	if (argc != 7) {
 		usage();
 		exit(1);
 	}
+
+	tls_init();
+	struct tls_config *tls_cfg = tls_config_new();
+	tls_config_set_ca_file(tls_cfg, argv[3]);
+	tls_config_set_cert_file(tls_cfg, argv[4]);
+	tls_config_set_key_file(tls_cfg, argv[5]);
+	portal_tls = tls_server();
+	tls_configure(portal_tls, tls_cfg);
+	tls_config_free(tls_cfg);
+#else
+	if (argc != 2) {
+		usage();
+		exit(1);
+	}
+#endif
 
 	all_pfds[0].fd     = open_portal(argv[1], argv[2]);
 	all_pfds[0].events = POLLIN;
@@ -402,13 +484,11 @@ main(int argc, const char *argv[])
 		int n = poll(all_pfds, NUM_PORTALS + nconns, -1);
 		if (n < 0) continue;
 
-		for (int i = 0; i < NUM_PORTALS; i++) {
-			if (all_pfds[i].revents & POLLIN) {
-				struct sockaddr_storage addr;
-				socklen_t addrlen = sizeof addr;
-				int fd = accept(all_pfds[i].fd, (void *) &addr, &addrlen);
-				add_conn(fd, &addr, addrlen);
-			}
+		if (all_pfds[0].revents & POLLIN) {
+			struct sockaddr_storage addr;
+			socklen_t addrlen = sizeof addr;
+			int fd = accept(all_pfds[0].fd, (void *) &addr, &addrlen);
+			add_conn(fd, &addr, addrlen);
 		}
 
 		for (int i = 0; i < nconns; i++) {
