@@ -1,8 +1,8 @@
 
 To Dos
 ------
-- Path validation
 - DoS protection
+- Fix signal race-condition
 - Proper Readme
 - Check `Host:`
 - Outputting `Date:`

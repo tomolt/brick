@@ -345,6 +345,28 @@ parse_http(const char *buf, const char **keys, char (*values)[MAX_HEADER], char 
 }
 
 static int
+sanitize_path(char *path)
+{
+	char *r = path, *w = path;
+	if (*r != '/') return -1;
+	for (;;) {
+		while (*r == '/') r++;
+		if (*r == '.') return -1;
+		char *d = strchr(r, '/');
+		if (!d) break;
+		size_t l = d - r + 1;
+		memmove(w, r, l);
+		w += l;
+		r = d;
+	}
+	size_t l = strlen(r);
+	memmove(w, r, l);
+	w += l;
+	*w = 0;
+	return 0;
+}
+
+static int
 process_request(int idx)
 {
 	struct conn *conn = &conns[idx];
@@ -352,6 +374,18 @@ process_request(int idx)
 
 	if (parse_http(conn->scratch, req_keys, req_headers, req_path) < 0) return -1;
 	printf("Requested path: %s\n", req_path);
+
+	if (sanitize_path(req_path) < 0) {
+		conn->length = snprintf(conn->scratch, SCRATCH,
+			"HTTP/1.1 400 Bad Request\r\n"
+			"Server: brick\r\n"
+			"Content-Type: text/plain\r\n"
+			"Content-Length: 15\r\n"
+			"\r\n"
+			"400 Bad Request");
+		return 0;
+	}
+	printf("Sanitized path: %s\n", req_path);
 
 	conn->src = open(req_path, O_RDONLY);
 	if (conn->src < 0) {
@@ -471,6 +505,31 @@ process_conn(int idx, int revents)
 }
 
 static void
+signal_handler(int sig)
+{
+	switch (sig) {
+	case SIGINT:
+	case SIGTERM: global_flags |= SHUTDOWN; break;
+	case SIGUSR1: global_flags |= RECONFIGURE; break;
+	}
+}
+
+static void
+reconfigure(void)
+{
+#if BRICK_TLS
+	if (portal_tls) tls_reset(portal_tls);
+	else portal_tls = tls_server();
+	struct tls_config *tls_cfg = tls_config_new();
+	tls_config_set_ca_file(tls_cfg, args[3]);
+	tls_config_set_cert_file(tls_cfg, args[4]);
+	tls_config_set_key_file(tls_cfg, args[5]);
+	tls_configure(portal_tls, tls_cfg);
+	tls_config_free(tls_cfg);
+#endif
+}
+
+static void
 teardown(void)
 {
 	close(all_pfds[0].fd);
@@ -485,31 +544,6 @@ teardown(void)
 	for (int i = 0; i < MAX_CONNS; i++) {
 		free(conns[i].scratch);
 	}
-}
-
-static void
-signal_handler(int sig)
-{
-	switch (sig) {
-	case SIGINT:
-	case SIGTERM: global_flags |= SHUTDOWN; break;
-	case SIGUSR1: global_flags |= RECONFIGURE; break;
-	}
-}
-
-static void
-reconfigure(void)
-{
-#if BRICK_TLS
-	if (portal_tls) tls_free(portal_tls);
-	struct tls_config *tls_cfg = tls_config_new();
-	tls_config_set_ca_file(tls_cfg, args[3]);
-	tls_config_set_cert_file(tls_cfg, args[4]);
-	tls_config_set_key_file(tls_cfg, args[5]);
-	portal_tls = tls_server();
-	tls_configure(portal_tls, tls_cfg);
-	tls_config_free(tls_cfg);
-#endif
 }
 
 int
@@ -539,17 +573,21 @@ main(int argc, const char **argv)
 		}
 	}
 
-	while (!(global_flags & SHUTDOWN)) {
+	for (;;) {
 		int n = poll(all_pfds, NUM_PORTALS + nconns, -1);
 
-		if (n < 0) {
-			if (global_flags & RECONFIGURE) {
-				printf("Reconfiguring.\n");
-				reconfigure();
-				global_flags &= ~RECONFIGURE;
-			}
-			continue;
+		if (global_flags & SHUTDOWN) {
+			printf("Shutting down.\n");
+			teardown();
+			exit(0);
 		}
+		if (global_flags & RECONFIGURE) {
+			printf("Reconfiguring.\n");
+			reconfigure();
+			global_flags &= ~RECONFIGURE;
+		}
+
+		if (n < 0) continue;
 
 		if (all_pfds[0].revents & POLLIN) {
 			struct sockaddr_storage addr;
@@ -568,8 +606,5 @@ main(int argc, const char **argv)
 			}
 		}
 	}
-
-	teardown();
-	return 0;
 }
 
