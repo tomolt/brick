@@ -167,7 +167,7 @@ same_addr(const struct sockaddr_storage *a, const struct sockaddr_storage *b)
 	default: /* AF_INET6 */
 		return memcmp(((struct sockaddr_in6 *) a)->sin6_addr.s6_addr,
 			((struct sockaddr_in6 *) b)->sin6_addr.s6_addr,
-			sizeof (((struct sockaddr_in6 *) a)->sin6_addr.s6_addr));
+			sizeof (((struct sockaddr_in6 *) a)->sin6_addr.s6_addr)) == 0;
 	}
 }
 
@@ -281,7 +281,7 @@ conn_read(int idx)
 #if BRICK_TLS
 	ssize_t n = tls_read(conn->tls, conn->scratch + conn->length, SCRATCH - conn->length);
 	switch (n) {
-	case -1: return -1;
+	case -1: fprintf(stderr, "tls_read: %s (non-fatal)\n", tls_error(conn->tls)); return -1;
 	case TLS_WANT_POLLIN:  conn_pfds[idx].events = POLLIN;  break;
 	case TLS_WANT_POLLOUT: conn_pfds[idx].events = POLLOUT; break;
 	default: conn->length += n;
@@ -314,7 +314,7 @@ conn_write(int idx)
 #if BRICK_TLS
 	ssize_t n = tls_write(conn->tls, conn->scratch + conn->offset, conn->length - conn->offset);
 	switch (n) {
-	case -1: return -1;
+	case -1: fprintf(stderr, "tls_write: %s (non-fatal)\n", tls_error(conn->tls)); return -1;
 	case TLS_WANT_POLLIN:  conn_pfds[idx].events = POLLIN;  break;
 	case TLS_WANT_POLLOUT: conn_pfds[idx].events = POLLOUT; break;
 	default: conn->offset += n;
@@ -374,7 +374,7 @@ parse_http(const char *buf, const char **keys, char (*values)[MAX_HEADER], char 
 	path[n] = 0;
 	p = q + 1;
 	
-	/* Parse the HTTP version & end of line. Must be HTTP/1.1. */
+	/* Parse the HTTP version & end of line. */
 	if (strncmp(p, "HTTP/1.1\r\n", 10)) return -1;
 	p += 10;
 	
@@ -604,10 +604,16 @@ reconfigure(void)
 	if (portal_tls) tls_reset(portal_tls);
 	else portal_tls = tls_server();
 	struct tls_config *tls_cfg = tls_config_new();
-	tls_config_set_ca_file  (tls_cfg, args[3]);
-	tls_config_set_cert_file(tls_cfg, args[4]);
-	tls_config_set_key_file (tls_cfg, args[5]);
-	tls_configure(portal_tls, tls_cfg);
+	if (tls_config_set_ca_file(tls_cfg, args[3]) < 0 ||
+		tls_config_set_cert_file(tls_cfg, args[4]) < 0 ||
+		tls_config_set_key_file (tls_cfg, args[5]) < 0) {
+		fprintf(stderr, "tls configuration: %s (non-fatal)\n", tls_config_error(tls_cfg));
+		tls_config_free(tls_cfg);
+		return;
+	}
+	if (tls_configure(portal_tls, tls_cfg) < 0) {
+		fprintf(stderr, "tls_configure: %s (non-fatal)\n", tls_error(portal_tls));
+	}
 	tls_config_free(tls_cfg);
 #endif
 }
