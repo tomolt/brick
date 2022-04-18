@@ -19,7 +19,7 @@
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
 #define NUM_PORTALS 1
-#define MAX_CONNS   2
+#define MAX_CONNS   1000
 #define BACKLOG     128
 #define SCRATCH     2048
 #define MAX_PATH    200
@@ -66,8 +66,31 @@ static char req_headers[sizeof req_keys / sizeof *req_keys - 1][MAX_HEADER];
 static char req_path[MAX_PATH];
 
 static const char *mime_types[] = {
-	".html", "text/html",
-	".htm", "text/html",
+        ".xml",   "application/xml; charset=utf-8",
+        ".xhtml", "application/xhtml+xml; charset=utf-8",
+        ".html",  "text/html; charset=utf-8",
+        ".htm",   "text/html; charset=utf-8",
+        ".css",   "text/css; charset=utf-8",
+        ".txt",   "text/plain; charset=utf-8",
+        ".md",    "text/plain; charset=utf-8",
+        ".c",     "text/plain; charset=utf-8",
+        ".h",     "text/plain; charset=utf-8",
+        ".gz",    "application/x-gtar",
+        ".tar",   "application/tar",
+        ".pdf",   "application/x-pdf",
+        ".png",   "image/png",
+        ".gif",   "image/gif",
+        ".jpeg",  "image/jpg",
+        ".jpg",   "image/jpg",
+        ".iso",   "application/x-iso9660-image",
+        ".webp",  "image/webp",
+        ".svg",   "image/svg+xml; charset=utf-8",
+        ".flac",  "audio/flac",
+        ".mp3",   "audio/mpeg",
+        ".ogg",   "audio/ogg",
+        ".mp4",   "video/mp4",
+        ".ogv",   "video/ogg",
+        ".webm",  "video/webm",
 	NULL
 };
 
@@ -348,7 +371,7 @@ process_request(int idx)
 		conn->length = snprintf(conn->scratch, SCRATCH,
 			"HTTP/1.1 404 Not Found\r\n"
 			"Server: brick\r\n"
-			"Content-Type: text/html;charset=UTF-8\r\n"
+			"Content-Type: text/plain\r\n"
 			"Content-Length: 13\r\n"
 			"\r\n"
 			"404 Not Found");
@@ -360,7 +383,7 @@ process_request(int idx)
 	// TODO err check
 	conn->content_length = meta.st_size;
 
-	const char *mime = "text/plain";
+	const char *mime = "application/octet-stream";
 	size_t pathlen = strlen(req_path);
 	for (int i = 0; mime_types[i]; i += 2) {
 		size_t len = strlen(mime_types[i]);
