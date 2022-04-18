@@ -1,7 +1,6 @@
 
 To Dos
 ------
-- Reloading certificates on SIGUSR1
 - `Connection: close`
 - Serving index.html for directories
 - DoS protection

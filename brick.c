@@ -31,9 +31,7 @@
 #define SHUTDOWN    0x1
 #define RECONFIGURE 0x2
 
-enum phase {
-	REQUEST, RESPONSE, PAYLOAD
-};
+enum phase { REQUEST, RESPONSE, PAYLOAD };
 
 struct conn {
 	char *scratch;
@@ -484,6 +482,21 @@ signal_handler(int sig)
 	}
 }
 
+static void
+reconfigure(void)
+{
+#if BRICK_TLS
+	if (portal_tls) tls_free(portal_tls);
+	struct tls_config *tls_cfg = tls_config_new();
+	tls_config_set_ca_file(tls_cfg, args[3]);
+	tls_config_set_cert_file(tls_cfg, args[4]);
+	tls_config_set_key_file(tls_cfg, args[5]);
+	portal_tls = tls_server();
+	tls_configure(portal_tls, tls_cfg);
+	tls_config_free(tls_cfg);
+#endif
+}
+
 int
 main(int argc, const char **argv)
 {
@@ -493,17 +506,7 @@ main(int argc, const char **argv)
 		exit(1);
 	}
 
-#if BRICK_TLS
-	tls_init();
-	struct tls_config *tls_cfg = tls_config_new();
-	tls_config_set_ca_file(tls_cfg, argv[3]);
-	tls_config_set_cert_file(tls_cfg, argv[4]);
-	tls_config_set_key_file(tls_cfg, argv[5]);
-	portal_tls = tls_server();
-	tls_configure(portal_tls, tls_cfg);
-	tls_config_free(tls_cfg);
-#endif
-
+	reconfigure();
 	all_pfds[0].fd     = open_portal(argv[1], argv[2]);
 	all_pfds[0].events = POLLIN;
 
@@ -527,6 +530,7 @@ main(int argc, const char **argv)
 		if (n < 0) {
 			if (global_flags & RECONFIGURE) {
 				printf("Reconfiguring.\n");
+				reconfigure();
 				global_flags &= ~RECONFIGURE;
 			}
 			continue;
