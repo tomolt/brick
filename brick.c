@@ -14,6 +14,9 @@
 
 #if BRICK_TLS
 # include <tls.h>
+# define NUM_ARGS 6
+#else
+# define NUM_ARGS 3
 #endif
 
 #define MIN(a,b) ((a)<(b)?(a):(b))
@@ -47,6 +50,7 @@ struct conn {
 	int src;
 };
 
+static const char **args;
 static volatile int global_flags;
 static int nconns;
 
@@ -97,14 +101,11 @@ static const char *mime_types[] = {
 static void
 usage(void)
 {
+	printf("usage: %s [host] [port]"
 #if BRICK_TLS
-	printf("usage: bricks [host] [port]"
 		" [ca-file] [cert-file] [key-file]"
-		"\n");
-#else
-	printf("usage: brick [host] [port]"
-		"\n");
 #endif
+		"\n", args[0]);
 }
 
 static int
@@ -484,14 +485,15 @@ signal_handler(int sig)
 }
 
 int
-main(int argc, const char *argv[])
+main(int argc, const char **argv)
 {
-#if BRICK_TLS
-	if (argc != 6) {
+	args = argv;
+	if (argc != NUM_ARGS) {
 		usage();
 		exit(1);
 	}
 
+#if BRICK_TLS
 	tls_init();
 	struct tls_config *tls_cfg = tls_config_new();
 	tls_config_set_ca_file(tls_cfg, argv[3]);
@@ -500,11 +502,6 @@ main(int argc, const char *argv[])
 	portal_tls = tls_server();
 	tls_configure(portal_tls, tls_cfg);
 	tls_config_free(tls_cfg);
-#else
-	if (argc != 3) {
-		usage();
-		exit(1);
-	}
 #endif
 
 	all_pfds[0].fd     = open_portal(argv[1], argv[2]);
