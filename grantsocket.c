@@ -93,8 +93,8 @@ main(int argc, char **argv)
 	argv += 3;
 	
 	int sock = open_listen_socket(host, port);
-	dup2(sock, fd);
-	close(sock);
+	if (dup2(sock, fd) < 0) die("dup2:");
+	if (sock != fd) close(sock);
 
 	errno = 0;
 	struct passwd *pwd = getpwnam(user);

@@ -17,16 +17,15 @@
 
 #if BRICK_TLS
 # include <tls.h>
-# define NUM_ARGS 6
+# define NUM_ARGS 4
 #else
-# define NUM_ARGS 3
+# define NUM_ARGS 1
 #endif
 
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
 #define NUM_PORTALS 1
 #define MAX_CONNS   1000
-#define BACKLOG     128
 #define SCRATCH     2048
 #define MAX_PATH    200
 #define MAX_HEADER  200
@@ -101,59 +100,11 @@ static const char *mime_types[] = {
 static void
 usage(void)
 {
-	printf("usage: %s [host] [port]"
+	printf("usage: %s"
 #if BRICK_TLS
-		" [ca-file] [cert-file] [key-file]"
+		" ca-file cert-file key-file"
 #endif
 		"\n", args[0]);
-}
-
-static int
-open_portal(const char *host, const char *port)
-{
-	struct addrinfo hints = {
-		.ai_flags    = AI_NUMERICSERV,
-		.ai_family   = AF_UNSPEC,
-		.ai_socktype = SOCK_STREAM,
-	};
-	struct addrinfo *ai, *p;
-	int err = getaddrinfo(host, port, &hints, &ai);
-	if (err) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(err));
-		exit(1);
-	}
-
-	int fd;
-	for (p = ai; p; p = p->ai_next) {
-		fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if (fd < 0) continue;
-
-		const int yes = 1;
-		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof (int));
-		
-		if (bind(fd, p->ai_addr, p->ai_addrlen) < 0) {
-			close(fd);
-			continue;
-		}
-
-		break;
-	}
-
-	if (!p) {
-		fprintf(stderr, "unable to open port\n");
-		exit(1);
-	}
-
-	int flags = fcntl(fd, F_GETFL, 0);
-	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-	if (listen(fd, BACKLOG) < 0) {
-		fprintf(stderr, "listen: %s\n", strerror(errno));
-		exit(1);
-	}
-
-	freeaddrinfo(ai);
-	return fd;
 }
 
 static int
@@ -604,9 +555,9 @@ reconfigure(void)
 	if (portal_tls) tls_reset(portal_tls);
 	else portal_tls = tls_server();
 	struct tls_config *tls_cfg = tls_config_new();
-	if (tls_config_set_ca_file(tls_cfg, args[3]) < 0 ||
-		tls_config_set_cert_file(tls_cfg, args[4]) < 0 ||
-		tls_config_set_key_file (tls_cfg, args[5]) < 0) {
+	if (tls_config_set_ca_file(tls_cfg, args[1]) < 0 ||
+		tls_config_set_cert_file(tls_cfg, args[2]) < 0 ||
+		tls_config_set_key_file (tls_cfg, args[3]) < 0) {
 		fprintf(stderr, "tls configuration: %s (non-fatal)\n", tls_config_error(tls_cfg));
 		tls_config_free(tls_cfg);
 		return;
@@ -632,7 +583,12 @@ teardown(void)
 int
 main(int argc, const char **argv)
 {
-	setlocale(LC_ALL, "C");
+	int optval;
+	socklen_t optlen = sizeof (int);
+	if (getsockopt(3, SOL_SOCKET, SO_ACCEPTCONN, &optval, &optlen) < 0 || !optval) {
+		fprintf(stderr, "fd 3 must be a listening socket.\n");
+		exit(1);
+	}
 
 	args = argv;
 	if (argc != NUM_ARGS) {
@@ -640,9 +596,12 @@ main(int argc, const char **argv)
 		exit(1);
 	}
 
-	reconfigure();
-	all_pfds[0].fd     = open_portal(argv[1], argv[2]);
+	all_pfds[0].fd     = 3;
 	all_pfds[0].events = POLLIN;
+	
+	setlocale(LC_ALL, "C");
+
+	reconfigure();
 
 	struct sigaction sa = { 0 };
 	sa.sa_handler = signal_handler;
