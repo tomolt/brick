@@ -11,9 +11,11 @@
 #include <pwd.h>
 #include <grp.h>
 
+#include "arg.h"
+
 #define BACKLOG 128
 
-const char *argv0;
+char *argv0;
 
 static void
 die(const char *fmt, ...)
@@ -34,11 +36,23 @@ die(const char *fmt, ...)
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: %s host port cmd ...\n", argv0);
+	fprintf(stderr, "usage: %s [-d fdnum] [-s user:group] host:port cmd ...\n", argv0);
+}
+
+static char *
+split_arg(char *arg)
+{
+	char *pivot = strrchr(arg, ':');
+	if (!pivot) {
+		usage();
+		exit(1);
+	}
+	*pivot = 0;
+	return pivot + 1;
 }
 
 static int
-open_listen_socket(const char *host, const char *port)
+open_socket(const char *host, const char *port)
 {
 	struct addrinfo hints = {
 		.ai_flags    = AI_NUMERICSERV,
@@ -78,35 +92,51 @@ open_listen_socket(const char *host, const char *port)
 int
 main(int argc, char **argv)
 {
-	int fd = 3;
-	const char *user  = "nobody";
-	const char *group = "nogroup";
-
 	argv0 = argv[0];
-	if (argc < 4) {
+
+	int fd = 3;
+	char *user = NULL, *group = NULL;
+	ARGBEGIN {
+	case 'h':
+		usage();
+		exit(0);
+	case 'd':
+		fd = atoi(EARGF(usage()));
+		break;
+	case 's':
+		user = EARGF(usage());
+		group = split_arg(user);
+		break;
+	default:
+		usage();
+		exit(1);
+	} ARGEND
+
+	if (argc < 2) {
 		usage();
 		exit(1);
 	}
 
-	const char *host = argv[1];
-	const char *port = argv[2];
-	argv += 3;
-	
-	int sock = open_listen_socket(host, port);
+	char *host = *argv++;
+	char *port = split_arg(host);
+
+	int sock = open_socket(host, port);
 	if (dup2(sock, fd) < 0) die("dup2:");
 	if (sock != fd) close(sock);
 
-	errno = 0;
-	struct passwd *pwd = getpwnam(user);
-	if (!pwd) die("getpwnam:");
+	if (user) {
+		errno = 0;
+		struct passwd *pwd = getpwnam(user);
+		if (!pwd) die("getpwnam:");
 
-	errno = 0;
-	struct group *grp = getgrnam(group);
-	if (!grp) die("getgrnam:");
+		errno = 0;
+		struct group *grp = getgrnam(group);
+		if (!grp) die("getgrnam:");
 
-	if (setgroups(1, &grp->gr_gid) < 0) die("setgroups:");
-	if (setgid(grp->gr_gid) < 0) die("setgid:");
-	if (setuid(pwd->pw_uid) < 0) die("setuid:");
+		if (setgroups(1, &grp->gr_gid) < 0) die("setgroups:");
+		if (setgid(grp->gr_gid) < 0) die("setgid:");
+		if (setuid(pwd->pw_uid) < 0) die("setuid:");
+	}
 
 	execvp(*argv, argv);
 	die("execvp:");

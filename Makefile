@@ -22,10 +22,10 @@ bricks: bricks.o
 	$(LD) $(LDFLAGS) $^ -o $@ -ltls
 
 bricks.o: brick.c
-	$(CC) $(CFLAGS) -c $^ -o $@ -DBRICK_TLS=1
+	$(CC) $(CFLAGS) -c $< -o $@ -DBRICK_TLS=1
 
 grantsocket: grantsocket.o
 	$(LD) $(LDFLAGS) $^ -o $@
 
-grantsocket.o: grantsocket.c
-	$(CC) $(CFLAGS) -c $^ -o $@
+grantsocket.o: grantsocket.c arg.h
+	$(CC) $(CFLAGS) -c $< -o $@
