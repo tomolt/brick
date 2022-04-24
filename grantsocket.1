@@ -1,0 +1,21 @@
+.Dd 2022-04-25
+.Dt GRANTSOCKET 1
+.Sh NAME
+.Nm grantsocket
+.Nd open socket and pass it to server
+.Sh SYNOPSIS
+.Nm
+.Op Fl d Ar fdnum
+.Op Fl s Ar user:group
+.Ar host:port
+.Ar cmd ...
+.Sh DESCRIPTION
+.Nm
+opens a socket and passes it onto another program in a file descriptor.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl d Ar fdnum
+.It Fl s Ar user:group
+.El
+.Sh AUTHORS
+.An Thomas Oltmann Aq Mt thomas.oltmann.hhg@gmail.com
