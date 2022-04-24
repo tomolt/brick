@@ -1,7 +1,7 @@
 NAME=brick
 VERSION=0.1
 PREFIX=/usr/local
-MANPREFIX=$(PREFIX)/share/doc
+MANPREFIX=$(PREFIX)/share/man
 
 CC=gcc
 LD=gcc
