@@ -365,12 +365,19 @@ static int
 sanitize_path(char *path)
 {
 	char *r = path, *w = path;
+	/* Paths must start with a slash. */
 	if (*r != '/') return -1;
+	/* Go through the path step-by-step. */
 	for (;;) {
+		/* Invariant: the path contained a slash right before the current character. */
+		/* Remove duplicate slashes, they are confusing. */
 		while (*r == '/') r++;
+		/* Refuse to access any file or directory that starts with a dot. Especially '../'! */
 		if (*r == '.') return -1;
+		/* Find the next delimiting slash */
 		char *d = strchr(r, '/');
 		if (!d) break;
+		/* This step is clean, copy it over, including the trailing slash. */
 		size_t l = d - r + 1;
 		memmove(w, r, l);
 		w += l;
@@ -378,9 +385,12 @@ sanitize_path(char *path)
 	}
 	size_t l = strlen(r);
 	if (l) {
+		/* Copy end of path over verbatim & NUL terminate. */
 		memmove(w, r, l);
 		w[l] = 0;
 	} else {
+		/* Path ends on a slash, so we append index.html if we can. */
+		/* Note: sizeof (string literal) == strlen + 1 */
 		if (w + sizeof "index.html" > path + MAX_PATH) return -1;
 		strcpy(w, "index.html");
 	}
