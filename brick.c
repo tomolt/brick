@@ -377,9 +377,13 @@ sanitize_path(char *path)
 		r = d;
 	}
 	size_t l = strlen(r);
-	memmove(w, r, l);
-	w += l;
-	*w = 0;
+	if (l) {
+		memmove(w, r, l);
+		w[l] = 0;
+	} else {
+		if (w + sizeof "index.html" > path + MAX_PATH) return -1;
+		strcpy(w, "index.html");
+	}
 	return 0;
 }
 
@@ -424,14 +428,6 @@ load_content(int idx, const char **mime)
 	struct stat meta;
 	fstat(conn->src, &meta);
 	// TODO err check
-	if (S_ISDIR(meta.st_mode)) {
-		int fd = openat(conn->src, "index.html", O_RDONLY);
-		close(conn->src);
-		conn->src = fd;
-		if (conn->src < 0) return 404;
-		fstat(conn->src, &meta);
-		*mime = "text/html;charset=UTF-8";
-	}
 	conn->content_length = meta.st_size;
 
 	return 200;
